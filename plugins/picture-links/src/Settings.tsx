@@ -1,20 +1,22 @@
-import { React, ReactNative, clipboard } from "@vendetta/metro/common";
+import { React, ReactNative, clipboard, stylesheet } from "@vendetta/metro/common";
 import { semanticColors } from "@vendetta/ui";
-import { getAssetIDByName } from "@vendetta/ui/assets";
-import { Forms } from "@vendetta/ui/components";
 import { showToast } from "@vendetta/ui/toasts";
 
-import { KEYS, clearDebug, dlog, dumpDebug, getCounters, probeComponents } from "./debug";
-import { openModal } from "./index";
+import { KEYS, clearDebug, dlog, dumpDebug, getCounters, hooks, probeComponents } from "./debug";
 
-const { FormSection, FormRow } = Forms;
-const { ScrollView, Text, View } = ReactNative;
+// NOTE: nothing in this file may touch the client (Forms, ReactNative, semanticColors, ...) while
+// the module is being evaluated. A throw there stops the whole plugin from loading, which is
+// exactly what hides this screen. Everything is looked up lazily, inside the component.
 
 // A small image that always exists, used to test the image viewer without involving any tap target.
 const TEST_IMAGE = "https://cdn.discordapp.com/embed/avatars/0.png";
 
-/** Turns the counters into a one-paragraph reading of what is going wrong. */
+/** Turns the counters into a short reading of what is going wrong. */
 function diagnose(counts: Record<string, number>): string {
+    if (hooks.loadErrors.length) {
+        return `Something failed while the plugin was loading (listed under "Problems while loading" in the report below). ${hooks.loadErrors[0]}`;
+    }
+
     const bannerRenders = (counts[KEYS.bannerRender] ?? 0) + (counts[KEYS.displayBannerRender] ?? 0);
     const bannerTaps = (counts[KEYS.bannerTap] ?? 0) + (counts[KEYS.displayBannerTap] ?? 0);
 
@@ -27,7 +29,75 @@ function diagnose(counts: Record<string, number>): string {
     return "Banner taps are reaching the plugin. If the image still does not open, look for 'image size failed' lines in the report below.";
 }
 
+function toast(message: string) {
+    try {
+        showToast(message);
+    } catch (e) {
+        dlog("ui", "toast failed", e);
+    }
+}
+
+function copyReport() {
+    try {
+        if (!clipboard?.setString) throw new Error("clipboard is not available");
+        clipboard.setString(dumpDebug());
+        toast("Copied report");
+    } catch (e) {
+        dlog("ui", "copy failed", e);
+        toast("Could not copy. Long-press the report text to select and copy it instead.");
+    }
+}
+
+let cachedStyles: any;
+
+/** Theme-aware styles. Falls back to fixed colours if the client has no themed stylesheet. */
+function getStyles() {
+    if (cachedStyles) return cachedStyles;
+
+    const font = ReactNative.Platform?.select?.({ ios: "Menlo", default: "monospace" });
+    const layout = {
+        container: { padding: 16, paddingBottom: 48 },
+        verdict: { fontSize: 14, lineHeight: 20, marginBottom: 8 },
+        heading: { fontSize: 12, fontWeight: "700", letterSpacing: 0.5, marginTop: 20, marginBottom: 8 },
+        button: { padding: 14, borderRadius: 10, marginBottom: 8 },
+        buttonLabel: { fontSize: 16, fontWeight: "600" },
+        buttonSub: { fontSize: 12, marginTop: 2 },
+        report: { fontSize: 11, fontFamily: font },
+    };
+
+    try {
+        cachedStyles = stylesheet.createThemedStyleSheet({
+            container: layout.container,
+            verdict: { ...layout.verdict, color: semanticColors.TEXT_NORMAL },
+            heading: { ...layout.heading, color: semanticColors.TEXT_MUTED },
+            button: { ...layout.button, backgroundColor: semanticColors.BACKGROUND_SECONDARY },
+            buttonLabel: { ...layout.buttonLabel, color: semanticColors.TEXT_NORMAL },
+            buttonSub: { ...layout.buttonSub, color: semanticColors.TEXT_MUTED },
+            report: { ...layout.report, color: semanticColors.TEXT_NORMAL },
+        });
+    } catch (e) {
+        dlog("ui", "themed stylesheet unavailable, using fixed colours", e);
+        const text = "#B5BAC1";
+        const muted = "#949BA4";
+        cachedStyles = ReactNative.StyleSheet.create({
+            container: layout.container,
+            verdict: { ...layout.verdict, color: text },
+            heading: { ...layout.heading, color: muted },
+            button: { ...layout.button, backgroundColor: "#2B2D31" },
+            buttonLabel: { ...layout.buttonLabel, color: text },
+            buttonSub: { ...layout.buttonSub, color: muted },
+            report: { ...layout.report, color: text },
+        });
+    }
+
+    return cachedStyles;
+}
+
 export default () => {
+    const { ScrollView, Text, View, Pressable, TouchableOpacity } = ReactNative;
+    const Touchable = Pressable ?? TouchableOpacity;
+    const styles = getStyles();
+
     const [, setTick] = React.useState(0);
     const refresh = React.useCallback(() => setTick((t: number) => t + 1), []);
 
@@ -37,61 +107,42 @@ export default () => {
         return () => clearInterval(id);
     }, []);
 
-    const textColor = semanticColors?.TEXT_NORMAL;
-    const mono = ReactNative.Platform.select({ ios: "Menlo", default: "monospace" });
+    const button = (label: string, sub: string | undefined, onPress: () => void) => (
+        <Touchable key={label} onPress={onPress} style={styles.button}>
+            <Text style={styles.buttonLabel}>{label}</Text>
+            {sub ? <Text style={styles.buttonSub}>{sub}</Text> : null}
+        </Touchable>
+    );
 
     return (
-        <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 38 }}>
-            <FormSection title="What this means">
-                <View style={{ padding: 16 }}>
-                    <Text style={{ color: textColor }}>{diagnose(getCounters())}</Text>
-                </View>
-            </FormSection>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.container}>
+            <Text style={styles.heading}>WHAT THIS MEANS</Text>
+            <Text style={styles.verdict}>{diagnose(getCounters())}</Text>
 
-            <FormSection title="Actions">
-                <FormRow
-                    label="Copy report"
-                    subLabel="Copies the report below so you can paste it into a chat"
-                    leading={<FormRow.Icon source={getAssetIDByName("ic_copy_message_link")} />}
-                    onPress={() => {
-                        clipboard.setString(dumpDebug());
-                        showToast("Copied report", getAssetIDByName("Check"));
-                    }}
-                />
-                <FormRow
-                    label="Test image viewer"
-                    subLabel="Opens a sample image without using any banner or avatar tap"
-                    onPress={() => {
-                        dlog("test", "Test image viewer pressed");
-                        openModal(TEST_IMAGE);
-                    }}
-                />
-                <FormRow
-                    label="Probe components"
-                    subLabel="Checks which banner and avatar components exist in this client"
-                    leading={<FormRow.Icon source={getAssetIDByName("ic_message_retry")} />}
-                    onPress={() => {
-                        probeComponents();
-                        refresh();
-                        showToast("Probe finished");
-                    }}
-                />
-                <FormRow
-                    label="Clear report"
-                    onPress={() => {
-                        clearDebug();
-                        refresh();
-                    }}
-                />
-            </FormSection>
+            <Text style={styles.heading}>ACTIONS</Text>
+            {button("Copy report", "Copies the report below so you can paste it into a chat", copyReport)}
+            {button("Test image viewer", "Opens a sample image without using any banner or avatar tap", () => {
+                dlog("test", "Test image viewer pressed");
+                if (hooks.openModal) hooks.openModal(TEST_IMAGE);
+                else dlog("test", "image viewer is not available because the plugin did not finish loading");
+                refresh();
+            })}
+            {button("Probe components", "Checks which banner and avatar components exist in this client", () => {
+                probeComponents();
+                refresh();
+                toast("Probe finished");
+            })}
+            {button("Clear report", undefined, () => {
+                clearDebug();
+                refresh();
+            })}
 
-            <FormSection title="Report">
-                <View style={{ padding: 16 }}>
-                    <Text selectable style={{ color: textColor, fontSize: 11, fontFamily: mono }}>
-                        {dumpDebug()}
-                    </Text>
-                </View>
-            </FormSection>
+            <Text style={styles.heading}>REPORT</Text>
+            <View>
+                <Text selectable style={styles.report}>
+                    {dumpDebug()}
+                </Text>
+            </View>
         </ScrollView>
     );
 };

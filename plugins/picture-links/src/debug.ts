@@ -26,6 +26,13 @@ export const KEYS = {
     displayBannerTap: "tap.displayBanner",
 } as const;
 
+/**
+ * Wiring between modules. The settings page uses this instead of importing index.tsx (which would
+ * be a circular import), and index.tsx records anything that went wrong while loading here so the
+ * settings page can show it.
+ */
+export const hooks: { openModal?: (src: string) => void; loadErrors: string[] } = { loadErrors: [] };
+
 const entries: Entry[] = [];
 const counters: Record<string, number> = {};
 const startedAt = Date.now();
@@ -142,6 +149,10 @@ export function dumpDebug(): string {
     const lines: string[] = [];
     lines.push("Picture Links Plus debug report");
     lines.push(clientInfo());
+    lines.push("");
+    lines.push("Problems while loading:");
+    if (!hooks.loadErrors.length) lines.push("  none");
+    for (const error of hooks.loadErrors) lines.push(`  ${error}`);
     lines.push("");
     lines.push("Counters:");
     const keys = Object.keys(counters);

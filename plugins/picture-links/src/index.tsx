@@ -2,23 +2,33 @@ import { findByProps, findByName, findByStoreName } from "@vendetta/metro";
 import { after } from "@vendetta/patcher";
 import { ReactNative } from "@vendetta/metro/common";
 import { findInReactTree } from "@vendetta/utils";
+import { showToast } from "@vendetta/ui/toasts";
 
-import { KEYS, describe, dlog, hit, shape } from "./debug";
+import { KEYS, describe, dlog, hit, hooks, shape } from "./debug";
 import Settings from "./Settings";
 
-const { Pressable } = findByProps("Button", "Text", "View");
-const ProfileBanner = findByName("ProfileBanner", false);
-const DisplayBanner = findByName("DisplayBanner", false);
-const HeaderAvatar = findByName("HeaderAvatar", false);
-const { openMediaModal } = findByProps("openMediaModal");
-const { hideActionSheet } = findByProps("hideActionSheet");
-const { getChannelId } = findByStoreName("SelectedChannelStore");
-const { getGuildId } = findByStoreName("SelectedGuildStore");
+/**
+ * Runs fn. If it throws, the failure is recorded (and shown on the settings page) instead of
+ * stopping the plugin from loading. A plugin that throws while loading is switched off by the
+ * client and loses its settings page, which makes it impossible to see what went wrong.
+ */
+function safe<T>(label: string, fn: () => T): T | undefined {
+    try {
+        return fn();
+    } catch (e) {
+        hooks.loadErrors.push(`${label}: ${describe(e)}`);
+        dlog("error", `${label} failed`, e);
+    }
+}
 
-dlog(
-    "init",
-    `plugin loaded. ProfileBanner=${ProfileBanner ? "found" : "MISSING"}, DisplayBanner=${DisplayBanner ? "found" : "MISSING"}, HeaderAvatar=${HeaderAvatar ? "found" : "MISSING"}`
-);
+const Pressable = safe("find Pressable", () => findByProps("Button", "Text", "View")?.Pressable ?? ReactNative.Pressable);
+const ProfileBanner = safe("find ProfileBanner", () => findByName("ProfileBanner", false));
+const DisplayBanner = safe("find DisplayBanner", () => findByName("DisplayBanner", false));
+const HeaderAvatar = safe("find HeaderAvatar", () => findByName("HeaderAvatar", false));
+const openMediaModal = safe("find openMediaModal", () => findByProps("openMediaModal")?.openMediaModal);
+const hideActionSheet = safe("find hideActionSheet", () => findByProps("hideActionSheet")?.hideActionSheet);
+const getChannelId = safe("find SelectedChannelStore", () => findByStoreName("SelectedChannelStore")?.getChannelId);
+const getGuildId = safe("find SelectedGuildStore", () => findByStoreName("SelectedGuildStore")?.getGuildId);
 
 function getImageSize(uri: string): Promise<{width: number, height: number}> {
     return new Promise((resolve, reject) => {
@@ -31,6 +41,11 @@ function getImageSize(uri: string): Promise<{width: number, height: number}> {
 }
 
 export async function openModal(src: string, event?, fallback?: string) {
+    if (!openMediaModal) {
+        dlog("modal", "cannot open the image: openMediaModal was not found in this client");
+        return;
+    }
+
     let size: { width: number, height: number };
     try {
         size = await getImageSize(src);
@@ -43,7 +58,7 @@ export async function openModal(src: string, event?, fallback?: string) {
     }
 
     try {
-        hideActionSheet(); // hide user sheet
+        hideActionSheet?.(); // hide user sheet
         dlog("modal", "opening media modal");
         openMediaModal({
             initialSources: [{
@@ -51,8 +66,8 @@ export async function openModal(src: string, event?, fallback?: string) {
                 sourceURI: src,
                 width: size.width,
                 height: size.height,
-                guildId: getGuildId(),
-                channelId: getChannelId(),
+                guildId: getGuildId?.(),
+                channelId: getChannelId?.(),
             }],
             initialIndex: 0,
             originLayout: {
@@ -84,40 +99,46 @@ function resolveBanner(bannerSource: any): { url: string, original: string } | u
     return { url, original };
 }
 
-const unpatchAvatar = after("default", HeaderAvatar, ([{ user, style, guildId }], res) => {
-    hit(KEYS.avatarRender, () => `HeaderAvatar rendered for user ${user?.id}`);
-    var ext = "png";
-    if (typeof user.guildMemberAvatars?.[guildId] === "string") {
-        if (user.guildMemberAvatars?.[guildId].includes("a_")) { ext = "gif"; }
-    }
-    const guildSpecific = user.guildMemberAvatars?.[guildId] && `https://cdn.discordapp.com/guilds/${guildId}/users/${user.id}/avatars/${user.guildMemberAvatars[guildId]}.${ext}?size=4096`;
-    const image = user?.getAvatarURL?.(false, 4096, true);
-    if (!image) return res;
+const unpatches: (() => void)[] = [];
 
-    const url =
-        typeof image === "number"
-            ? `https://cdn.discordapp.com/embed/avatars/${Number(BigInt(user.id) >> 22n) % 6}.png`
-            : image?.replace(".webp", ".png");
+safe("patch HeaderAvatar", () => {
+    if (!HeaderAvatar) throw new Error("HeaderAvatar component not found");
 
-    delete res.props.style;
+    unpatches.push(after("default", HeaderAvatar, ([{ user, style, guildId }], res) => {
+        hit(KEYS.avatarRender, () => `HeaderAvatar rendered for user ${user?.id}`);
+        var ext = "png";
+        if (typeof user.guildMemberAvatars?.[guildId] === "string") {
+            if (user.guildMemberAvatars?.[guildId].includes("a_")) { ext = "gif"; }
+        }
+        const guildSpecific = user.guildMemberAvatars?.[guildId] && `https://cdn.discordapp.com/guilds/${guildId}/users/${user.id}/avatars/${user.guildMemberAvatars[guildId]}.${ext}?size=4096`;
+        const image = user?.getAvatarURL?.(false, 4096, true);
+        if (!image) return res;
 
-    return (
-        <Pressable
-            onPress={({ nativeEvent }) => {
-                hit(KEYS.avatarTap, () => `avatar tapped, opening ${url}`);
-                openModal(url, nativeEvent);
-            }}
-            onLongPress={({ nativeEvent }) => guildSpecific && openModal(guildSpecific, nativeEvent)}
-            style={style}>
-            {res}
-        </Pressable>
-    );
+        const url =
+            typeof image === "number"
+                ? `https://cdn.discordapp.com/embed/avatars/${Number(BigInt(user.id) >> 22n) % 6}.png`
+                : image?.replace(".webp", ".png");
+
+        delete res.props.style;
+
+        return (
+            <Pressable
+                onPress={({ nativeEvent }) => {
+                    hit(KEYS.avatarTap, () => `avatar tapped, opening ${url}`);
+                    openModal(url, nativeEvent);
+                }}
+                onLongPress={({ nativeEvent }) => guildSpecific && openModal(guildSpecific, nativeEvent)}
+                style={style}>
+                {res}
+            </Pressable>
+        );
+    }));
 });
 
-const bannerPatches: (() => void)[] = [];
+safe("patch ProfileBanner", () => {
+    if (!ProfileBanner) throw new Error("ProfileBanner component not found");
 
-if (ProfileBanner) {
-    bannerPatches.push(after("default", ProfileBanner, ([props], res) => {
+    unpatches.push(after("default", ProfileBanner, ([props], res) => {
         const bannerSource = props?.bannerSource;
         hit(KEYS.bannerRender, () => `ProfileBanner rendered. props=${shape(props)}, bannerSource=${describe(bannerSource)}`);
 
@@ -138,15 +159,15 @@ if (ProfileBanner) {
             </Pressable>
         );
     }));
-} else {
-    dlog("init", "ProfileBanner component not found, banner patch skipped");
-}
+});
 
 // DisplayBanner is the component that renders the banner together with its own tap target.
 // If the ProfileBanner patch above is not reached on a given Discord version, hooking that
 // tap target directly still makes the banner clickable.
-if (DisplayBanner) {
-    bannerPatches.push(after("default", DisplayBanner, ([props], res) => {
+safe("patch DisplayBanner", () => {
+    if (!DisplayBanner) throw new Error("DisplayBanner component not found");
+
+    unpatches.push(after("default", DisplayBanner, ([props], res) => {
         hit(KEYS.displayBannerRender, () => `DisplayBanner rendered. props=${shape(props)}, output=${shape(res)}`);
         try {
             const wrapper = findInReactTree(res, (x) => x?.accessibilityRole === "image" && x.onPress != null);
@@ -170,9 +191,7 @@ if (DisplayBanner) {
             dlog("DisplayBanner", "patch threw", e);
         }
     }));
-} else {
-    dlog("init", "DisplayBanner component not found, tap-target patch skipped");
-}
+});
 
 //var unpatchGuildIcon
 
@@ -183,7 +202,7 @@ if (DisplayBanner) {
 //        if (this.props?.size !== "XLARGE") return;
 //        const url = this.props?.guild?.getIconURL?.(4096);
 //        if (!url) return res;
-//      
+//
 //        return (
 //            <Pressable onPress={({ nativeEvent }) => openModal(url, nativeEvent)}>
 //                {res}
@@ -198,7 +217,7 @@ if (DisplayBanner) {
 //        var ext = "png"
 //        if (guild?.icon.includes('a_')) { ext = "gif"; }
 //        const url = `https://cdn.discordapp.com/icons/${guild?.id}/${guild?.icon}.${ext}?size=4096`
-//    
+//
 //        return (
 //            <Pressable onPress={({ nativeEvent }) => openModal(url, nativeEvent)}>
 //                {res}
@@ -207,10 +226,22 @@ if (DisplayBanner) {
 //    });
 //}
 
+hooks.openModal = (src: string) => openModal(src);
+
+const problems = hooks.loadErrors.length;
+dlog(
+    "init",
+    `plugin loaded with ${problems} problem(s). ProfileBanner=${ProfileBanner ? "found" : "MISSING"}, DisplayBanner=${DisplayBanner ? "found" : "MISSING"}, HeaderAvatar=${HeaderAvatar ? "found" : "MISSING"}`
+);
+
+// Temporary while debugging: a toast on every start shows that this build is the one running, and
+// whether anything went wrong, even if the settings page cannot be opened.
+safe("show startup toast", () => showToast(problems ? `Picture Links Plus: ${problems} problem(s), open the plugin settings` : "Picture Links Plus loaded"));
+
 export const settings = Settings;
 
 export function onUnload() {
-    unpatchAvatar();
-    for (const unpatch of bannerPatches) unpatch?.();
+    hooks.openModal = undefined;
+    for (const unpatch of unpatches) unpatch?.();
 //    unpatchGuildIcon();
 }
