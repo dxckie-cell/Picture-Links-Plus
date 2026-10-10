@@ -1,8 +1,10 @@
-import { logger } from "@vendetta";
 import { findByProps, findByName, findByStoreName } from "@vendetta/metro";
 import { after } from "@vendetta/patcher";
 import { ReactNative } from "@vendetta/metro/common";
 import { findInReactTree } from "@vendetta/utils";
+
+import { KEYS, describe, dlog, hit, shape } from "./debug";
+import Settings from "./Settings";
 
 const { Pressable } = findByProps("Button", "Text", "View");
 const ProfileBanner = findByName("ProfileBanner", false);
@@ -12,6 +14,11 @@ const { openMediaModal } = findByProps("openMediaModal");
 const { hideActionSheet } = findByProps("hideActionSheet");
 const { getChannelId } = findByStoreName("SelectedChannelStore");
 const { getGuildId } = findByStoreName("SelectedGuildStore");
+
+dlog(
+    "init",
+    `plugin loaded. ProfileBanner=${ProfileBanner ? "found" : "MISSING"}, DisplayBanner=${DisplayBanner ? "found" : "MISSING"}, HeaderAvatar=${HeaderAvatar ? "found" : "MISSING"}`
+);
 
 function getImageSize(uri: string): Promise<{width: number, height: number}> {
     return new Promise((resolve, reject) => {
@@ -23,36 +30,42 @@ function getImageSize(uri: string): Promise<{width: number, height: number}> {
     });
 }
 
-async function openModal(src: string, event?, fallback?: string) {
+export async function openModal(src: string, event?, fallback?: string) {
     let size: { width: number, height: number };
     try {
         size = await getImageSize(src);
+        dlog("modal", `image size ok ${size.width}x${size.height} for ${src}`);
     } catch (e) {
         // Previously this rejection was swallowed, so a tap just did nothing.
-        logger.warn(`[Picture Links] Failed to load image size for ${src}`, e);
+        dlog("modal", `image size failed for ${src}`, e);
         if (fallback && fallback !== src) return openModal(fallback, event);
         return;
     }
 
-    hideActionSheet(); // hide user sheet
-    openMediaModal({
-        initialSources: [{
-            uri: src,
-            sourceURI: src,
-            width: size.width,
-            height: size.height,
-            guildId: getGuildId(),
-            channelId: getChannelId(),
-        }],
-        initialIndex: 0,
-        originLayout: {
-            width: 0, // this would ideally be the size of the small pfp but this proved very hard to implement
-            height: 0,
-            x: event?.pageX ?? 0,
-            y: event?.pageY ?? 0,
-            resizeMode: "fill",
-        }
-    });
+    try {
+        hideActionSheet(); // hide user sheet
+        dlog("modal", "opening media modal");
+        openMediaModal({
+            initialSources: [{
+                uri: src,
+                sourceURI: src,
+                width: size.width,
+                height: size.height,
+                guildId: getGuildId(),
+                channelId: getChannelId(),
+            }],
+            initialIndex: 0,
+            originLayout: {
+                width: 0, // this would ideally be the size of the small pfp but this proved very hard to implement
+                height: 0,
+                x: event?.pageX ?? 0,
+                y: event?.pageY ?? 0,
+                resizeMode: "fill",
+            }
+        });
+    } catch (e) {
+        dlog("modal", "openMediaModal threw", e);
+    }
 }
 
 // Returns the full-size URL for a banner plus the untouched original as a fallback.
@@ -72,6 +85,7 @@ function resolveBanner(bannerSource: any): { url: string, original: string } | u
 }
 
 const unpatchAvatar = after("default", HeaderAvatar, ([{ user, style, guildId }], res) => {
+    hit(KEYS.avatarRender, () => `HeaderAvatar rendered for user ${user?.id}`);
     var ext = "png";
     if (typeof user.guildMemberAvatars?.[guildId] === "string") {
         if (user.guildMemberAvatars?.[guildId].includes("a_")) { ext = "gif"; }
@@ -89,7 +103,10 @@ const unpatchAvatar = after("default", HeaderAvatar, ([{ user, style, guildId }]
 
     return (
         <Pressable
-            onPress={({ nativeEvent }) => openModal(url, nativeEvent)}
+            onPress={({ nativeEvent }) => {
+                hit(KEYS.avatarTap, () => `avatar tapped, opening ${url}`);
+                openModal(url, nativeEvent);
+            }}
             onLongPress={({ nativeEvent }) => guildSpecific && openModal(guildSpecific, nativeEvent)}
             style={style}>
             {res}
@@ -100,40 +117,61 @@ const unpatchAvatar = after("default", HeaderAvatar, ([{ user, style, guildId }]
 const bannerPatches: (() => void)[] = [];
 
 if (ProfileBanner) {
-    bannerPatches.push(after("default", ProfileBanner, ([{ bannerSource }], res) => {
+    bannerPatches.push(after("default", ProfileBanner, ([props], res) => {
+        const bannerSource = props?.bannerSource;
+        hit(KEYS.bannerRender, () => `ProfileBanner rendered. props=${shape(props)}, bannerSource=${describe(bannerSource)}`);
+
         const banner = resolveBanner(bannerSource);
-        if (!banner || !res) return res;
+        if (!banner || !res) {
+            hit("ProfileBanner.skipped", () => `not wrapped: ${!res ? "component returned nothing" : "bannerSource has no usable uri"}`);
+            return res;
+        }
 
         return (
-            <Pressable onPress={({ nativeEvent }) => openModal(banner.url, nativeEvent, banner.original)}>
+            <Pressable
+                onPress={({ nativeEvent }) => {
+                    hit(KEYS.bannerTap, () => `banner tapped (ProfileBanner wrapper), opening ${banner.url}`);
+                    openModal(banner.url, nativeEvent, banner.original);
+                }}
+            >
                 {res}
             </Pressable>
         );
     }));
 } else {
-    logger.warn("[Picture Links] ProfileBanner component not found, banner patch skipped");
+    dlog("init", "ProfileBanner component not found, banner patch skipped");
 }
 
 // DisplayBanner is the component that renders the banner together with its own tap target.
 // If the ProfileBanner patch above is not reached on a given Discord version, hooking that
 // tap target directly still makes the banner clickable.
 if (DisplayBanner) {
-    bannerPatches.push(after("default", DisplayBanner, (_, res) => {
+    bannerPatches.push(after("default", DisplayBanner, ([props], res) => {
+        hit(KEYS.displayBannerRender, () => `DisplayBanner rendered. props=${shape(props)}, output=${shape(res)}`);
         try {
             const wrapper = findInReactTree(res, (x) => x?.accessibilityRole === "image" && x.onPress != null);
-            if (!wrapper) return;
+            if (!wrapper) {
+                hit("DisplayBanner.noTapTarget", () => "no element with accessibilityRole=image and onPress in the output, not hooked");
+                return;
+            }
 
             const bannerProps = findInReactTree(wrapper, (x) => x?.bannerSource != null);
             const banner = resolveBanner(bannerProps?.bannerSource);
-            if (!banner) return;
+            if (!banner) {
+                hit("DisplayBanner.noBannerSource", () => `tap target found but no usable bannerSource inside it (${describe(bannerProps?.bannerSource)})`);
+                return;
+            }
 
-            wrapper.onPress = (e) => openModal(banner.url, e?.nativeEvent, banner.original);
+            wrapper.onPress = (e) => {
+                hit(KEYS.displayBannerTap, () => `banner tapped (DisplayBanner tap target), opening ${banner.url}`);
+                openModal(banner.url, e?.nativeEvent, banner.original);
+            };
         } catch (e) {
-            logger.warn("[Picture Links] DisplayBanner patch failed", e);
+            dlog("DisplayBanner", "patch threw", e);
         }
     }));
 } else {
-    logger.warn("[Picture Links] DisplayBanner component not found, tap-target patch skipped");
+    dlog("init", "DisplayBanner component not found, tap-target patch skipped");
 }
 
 //var unpatchGuildIcon
@@ -168,6 +206,8 @@ if (DisplayBanner) {
 //        );
 //    });
 //}
+
+export const settings = Settings;
 
 export function onUnload() {
     unpatchAvatar();
