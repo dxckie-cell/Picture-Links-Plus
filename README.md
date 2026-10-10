@@ -12,6 +12,8 @@ Copy & paste the plugin URL into the Plugins page of your client:
 
 (Requires GitHub Pages to be enabled for this repo: Settings → Pages → deploy from the `gh-pages` branch. The `Build and deploy` workflow creates that branch on the first push to `main`.)
 
+**Updates are not live until GitHub Pages has published them.** After a push, the `Build and deploy` run only builds the plugin; a second run called `pages build and deployment` then publishes it, which usually takes about a minute. Check the Actions tab: the update is live once both have finished. Your client keeps the copy it already downloaded, so after an update remove the plugin and install it again from the URL.
+
 ## What's different from the original?
 
 Profile banners could not be tapped while profile pictures could. Changes:
