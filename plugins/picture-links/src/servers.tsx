@@ -22,6 +22,10 @@ type OpenModal = (src: string, event?: any, fallback?: string) => unknown;
 const TARGETS: { kind: Kind; pattern: RegExp }[] = [
     { kind: "icon", pattern: /^(Guild|Server)Icon(Inner)?$/ },
     { kind: "banner", pattern: /^(Guild|Server)(Profile|Header|Sheet)?Banner(Image|Background)?$/ },
+    // Discord 343: the server menu's header draws the banner (the trace showed props={guild} and a
+    // banners/ image in its output). Its icon is a GuildIconInner with its own tap, which takes
+    // priority over this wrapper, so tapping the icon still opens the icon.
+    { kind: "banner", pattern: /^GuildActionSheetHeader$/ },
 ];
 
 const SERVER_IMAGE = /^https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\/(icons|banners|splashes|discovery-splashes)\/\d+\//;
@@ -156,7 +160,11 @@ function guildImage(kind: Kind, props: any, res: any): { url: string; original: 
     }
 
     // 2. An image uri passed straight in through the props, or drawn somewhere in the output.
-    return fullSize(uriOf(props) ?? uriInTree(res));
+    //    It has to be the right kind of image: a banner component must not open the icon it also draws.
+    const found = fullSize(uriOf(props) ?? uriInTree(res));
+    if (!found) return;
+    const wanted = kind === "icon" ? /\/icons\// : /\/(banners|splashes|discovery-splashes)\//;
+    return wanted.test(found.original) ? found : undefined;
 }
 
 /** Icons show up everywhere (server list, pickers...). Only the big ones should open a viewer. */
