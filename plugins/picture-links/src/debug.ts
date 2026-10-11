@@ -38,6 +38,8 @@ export const hooks: {
     serverComponents: { name: string; kind: string; target: string }[];
     /** Result of the last "Scan server components" run, one line per component. */
     scanResults?: string[];
+    /** How many components trace mode is watching right now, if it is on. */
+    tracing?: number;
 } = { loadErrors: [], serverComponents: [] };
 
 const entries: Entry[] = [];
@@ -162,12 +164,16 @@ export function dumpDebug(): string {
     if (!hooks.loadErrors.length) lines.push("  none");
     for (const error of hooks.loadErrors) lines.push(`  ${error}`);
     lines.push("");
+    lines.push(hooks.tracing
+        ? `Trace mode: ON, watching ${hooks.tracing} components. Counters starting with "trace." show which of them draw a server icon or banner.`
+        : "Trace mode: off");
+    lines.push("");
     lines.push("Server icon/banner components patched at startup:");
     if (!hooks.serverComponents.length) lines.push("  none found");
     for (const c of hooks.serverComponents) lines.push(`  ${c.name} (${c.kind}, patched via ${c.target})`);
     if (hooks.scanResults) {
         lines.push("");
-        lines.push(`Scan for components with guild/server in their name (${hooks.scanResults.length}):`);
+        lines.push(`Scan for banner/splash components and server-related components that may show an image (${hooks.scanResults.length}):`);
         if (!hooks.scanResults.length) lines.push("  none");
         for (const line of hooks.scanResults) lines.push(`  ${line}`);
     }

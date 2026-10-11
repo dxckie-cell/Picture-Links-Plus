@@ -3,7 +3,7 @@ import { semanticColors } from "@vendetta/ui";
 import { showToast } from "@vendetta/ui/toasts";
 
 import { KEYS, clearDebug, dlog, dumpDebug, getCounters, hooks, probeComponents } from "./debug";
-import { scanServerNames } from "./servers";
+import { isTracing, scanServerNames, startTrace, stopTrace } from "./servers";
 
 // NOTE: nothing in this file may touch the client (Forms, ReactNative, semanticColors, ...) while
 // the module is being evaluated. A throw there stops the whole plugin from loading, which is
@@ -30,8 +30,25 @@ function diagnose(counts: Record<string, number>): string {
     return "Banner taps are reaching the plugin. If the image still does not open, look for 'image size failed' lines in the report below.";
 }
 
-/** Same idea for server icons and banners. */
+/** Same idea for server icons and banners, plus what trace mode has seen. */
 function diagnoseServers(counts: Record<string, number>): string {
+    // counters look like "trace.<Component>.<what it drew>", list each component once
+    const traced = [...new Set(
+        Object.keys(counts)
+            .filter((key) => key.startsWith("trace."))
+            .map((key) => key.slice("trace.".length).split(".")[0])
+    )];
+
+    const traceNote = traced.length
+        ? ` Trace has seen server images drawn by: ${traced.join(", ")}.`
+        : hooks.tracing
+            ? " Tracing is on but has not seen a server image yet."
+            : "";
+
+    return serverVerdict(counts) + traceNote;
+}
+
+function serverVerdict(counts: Record<string, number>): string {
     const sum = (suffix: string) =>
         Object.keys(counts)
             .filter((key) => key.startsWith("server.") && key.endsWith(suffix))
@@ -164,6 +181,28 @@ export default () => {
                 }
                 refresh();
             })}
+            {button(
+                isTracing() ? "Stop tracing" : "Start tracing server images",
+                isTracing()
+                    ? "Tracing is ON. Open a server's sheet, profile and invite, tap around, then come back here and copy the report"
+                    : "Watches which components draw server icons and banners. Start it, open those screens, then come back and copy the report",
+                () => {
+                    try {
+                        if (isTracing()) {
+                            stopTrace();
+                            hooks.tracing = undefined;
+                            toast("Tracing stopped");
+                        } else {
+                            hooks.tracing = startTrace();
+                            toast(`Tracing ${hooks.tracing} components`);
+                        }
+                    } catch (e) {
+                        dlog("trace", "toggle failed", e);
+                        toast("Tracing failed, see the report");
+                    }
+                    refresh();
+                }
+            )}
             {button("Clear report", undefined, () => {
                 clearDebug();
                 refresh();

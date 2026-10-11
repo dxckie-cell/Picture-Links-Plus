@@ -4,7 +4,7 @@ import { ReactNative } from "@vendetta/metro/common";
 import { findInReactTree } from "@vendetta/utils";
 
 import { KEYS, describe, dlog, hit, hooks, shape } from "./debug";
-import { installServerPatches } from "./servers";
+import { installServerPatches, stopTrace } from "./servers";
 import Settings from "./Settings";
 
 /**
@@ -208,5 +208,7 @@ export const settings = Settings;
 export function onUnload() {
     hooks.openModal = undefined;
     hooks.serverComponents.length = 0;
+    hooks.tracing = undefined;
+    stopTrace();
     for (const unpatch of unpatches) unpatch?.();
 }
