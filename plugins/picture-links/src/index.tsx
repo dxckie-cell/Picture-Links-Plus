@@ -1,65 +1,56 @@
-import { findByProps, findByName, findByStoreName } from "@vendetta/metro";
+import { logger } from "@vendetta";
+import { findAll, findByProps, findByName, findByStoreName } from "@vendetta/metro";
 import { after } from "@vendetta/patcher";
 import { ReactNative } from "@vendetta/metro/common";
-import { findInReactTree } from "@vendetta/utils";
-
-import { KEYS, describe, dlog, hit, hooks, shape } from "./debug";
-import { installServerPatches, stopTrace } from "./servers";
-import Settings from "./Settings";
 
 /**
- * Runs fn. If it throws, the failure is recorded (and shown on the settings page) instead of
- * stopping the plugin from loading. A plugin that throws while loading is switched off by the
- * client and loses its settings page, which makes it impossible to see what went wrong.
+ * Runs fn and logs instead of throwing. A plugin that throws while loading is switched off by the
+ * client, so one missing component must not take the others down with it.
  */
 function safe<T>(label: string, fn: () => T): T | undefined {
     try {
         return fn();
     } catch (e) {
-        hooks.loadErrors.push(`${label}: ${describe(e)}`);
-        dlog("error", `${label} failed`, e);
+        try {
+            logger.warn(`[Picture Links+] ${label} failed`, e);
+        } catch (e2) {
+            // the client logger must never break the plugin either
+        }
     }
 }
 
 const Pressable = safe("find Pressable", () => findByProps("Button", "Text", "View")?.Pressable ?? ReactNative.Pressable);
 const ProfileBanner = safe("find ProfileBanner", () => findByName("ProfileBanner", false));
-const DisplayBanner = safe("find DisplayBanner", () => findByName("DisplayBanner", false));
 const HeaderAvatar = safe("find HeaderAvatar", () => findByName("HeaderAvatar", false));
 const openMediaModal = safe("find openMediaModal", () => findByProps("openMediaModal")?.openMediaModal);
 const hideActionSheet = safe("find hideActionSheet", () => findByProps("hideActionSheet")?.hideActionSheet);
 const getChannelId = safe("find SelectedChannelStore", () => findByStoreName("SelectedChannelStore")?.getChannelId);
 const getGuildId = safe("find SelectedGuildStore", () => findByStoreName("SelectedGuildStore")?.getGuildId);
 
-function getImageSize(uri: string): Promise<{width: number, height: number}> {
+function getImageSize(uri: string): Promise<{ width: number, height: number }> {
     return new Promise((resolve, reject) => {
         ReactNative.Image.getSize(
-        uri,
-        (width, height) => resolve({width, height}),
-        (error) => reject(error)
+            uri,
+            (width, height) => resolve({ width, height }),
+            (error) => reject(error)
         );
     });
 }
 
-export async function openModal(src: string, event?, fallback?: string) {
-    if (!openMediaModal) {
-        dlog("modal", "cannot open the image: openMediaModal was not found in this client");
-        return;
-    }
+async function openModal(src: string, event?, fallback?: string) {
+    if (!openMediaModal) return;
 
     let size: { width: number, height: number };
     try {
         size = await getImageSize(src);
-        dlog("modal", `image size ok ${size.width}x${size.height} for ${src}`);
     } catch (e) {
-        // Previously this rejection was swallowed, so a tap just did nothing.
-        dlog("modal", `image size failed for ${src}`, e);
+        safe("load image size", () => logger.warn(`[Picture Links+] Failed to load image size for ${src}`, e));
         if (fallback && fallback !== src) return openModal(fallback, event);
         return;
     }
 
-    try {
+    safe("open media modal", () => {
         hideActionSheet?.(); // hide user sheet
-        dlog("modal", "opening media modal");
         openMediaModal({
             initialSources: [{
                 uri: src,
@@ -78,12 +69,10 @@ export async function openModal(src: string, event?, fallback?: string) {
                 resizeMode: "fill",
             }
         });
-    } catch (e) {
-        dlog("modal", "openMediaModal threw", e);
-    }
+    });
 }
 
-// Returns the full-size URL for a banner plus the untouched original as a fallback.
+// Full-size URL for a user banner, plus the untouched original as a fallback.
 function resolveBanner(bannerSource: any): { url: string, original: string } | undefined {
     const original = typeof bannerSource === "string" ? bannerSource : bannerSource?.uri;
     if (typeof original !== "string" || !original) return;
@@ -93,19 +82,17 @@ function resolveBanner(bannerSource: any): { url: string, original: string } | u
         return { url: original, original };
     }
 
-    // Drop every query parameter (the old regex broke when the URL had more than just ?size=),
-    // then request the largest size.
-    const url = `${original.split("?")[0].replace(".webp", ".png")}?size=4096`;
-    return { url, original };
+    // Drop every query parameter, then ask for the largest size.
+    return { url: `${original.split("?")[0].replace(".webp", ".png")}?size=4096`, original };
 }
 
 const unpatches: (() => void)[] = [];
 
+// Profile pictures
 safe("patch HeaderAvatar", () => {
     if (!HeaderAvatar) throw new Error("HeaderAvatar component not found");
 
     unpatches.push(after("default", HeaderAvatar, ([{ user, style, guildId }], res) => {
-        hit(KEYS.avatarRender, () => `HeaderAvatar rendered for user ${user?.id}`);
         var ext = "png";
         if (typeof user.guildMemberAvatars?.[guildId] === "string") {
             if (user.guildMemberAvatars?.[guildId].includes("a_")) { ext = "gif"; }
@@ -123,10 +110,7 @@ safe("patch HeaderAvatar", () => {
 
         return (
             <Pressable
-                onPress={({ nativeEvent }) => {
-                    hit(KEYS.avatarTap, () => `avatar tapped, opening ${url}`);
-                    openModal(url, nativeEvent);
-                }}
+                onPress={({ nativeEvent }) => openModal(url, nativeEvent)}
                 onLongPress={({ nativeEvent }) => guildSpecific && openModal(guildSpecific, nativeEvent)}
                 style={style}>
                 {res}
@@ -135,80 +119,101 @@ safe("patch HeaderAvatar", () => {
     }));
 });
 
+// Profile banners
 safe("patch ProfileBanner", () => {
     if (!ProfileBanner) throw new Error("ProfileBanner component not found");
 
     unpatches.push(after("default", ProfileBanner, ([props], res) => {
-        const bannerSource = props?.bannerSource;
-        hit(KEYS.bannerRender, () => `ProfileBanner rendered. props=${shape(props)}, bannerSource=${describe(bannerSource)}`);
-
-        const banner = resolveBanner(bannerSource);
-        if (!banner || !res) {
-            hit("ProfileBanner.skipped", () => `not wrapped: ${!res ? "component returned nothing" : "bannerSource has no usable uri"}`);
-            return res;
-        }
+        const banner = resolveBanner(props?.bannerSource);
+        if (!banner || !res) return res;
 
         return (
-            <Pressable
-                onPress={({ nativeEvent }) => {
-                    hit(KEYS.bannerTap, () => `banner tapped (ProfileBanner wrapper), opening ${banner.url}`);
-                    openModal(banner.url, nativeEvent, banner.original);
-                }}
-            >
+            <Pressable onPress={({ nativeEvent }) => openModal(banner.url, nativeEvent, banner.original)}>
                 {res}
             </Pressable>
         );
     }));
 });
 
-// DisplayBanner is the component that renders the banner together with its own tap target.
-// If the ProfileBanner patch above is not reached on a given Discord version, hooking that
-// tap target directly still makes the banner clickable.
-safe("patch DisplayBanner", () => {
-    if (!DisplayBanner) throw new Error("DisplayBanner component not found");
+// Server icons and banners.
+//
+// Discord gives these components no stable export names, so they are found by their display names
+// (these are the ones used by Discord 343): GuildIconInner draws the server icon and
+// GuildActionSheetHeader draws the banner in the server menu. The icon inside the header has its
+// own tap, which wins over the header's, so tapping the icon still opens the icon.
+const SERVER_COMPONENTS: Record<string, "icon" | "banner"> = {
+    GuildIconInner: "icon",
+    GuildIcon: "icon",
+    GuildActionSheetHeader: "banner",
+};
 
-    unpatches.push(after("default", DisplayBanner, ([props], res) => {
-        hit(KEYS.displayBannerRender, () => `DisplayBanner rendered. props=${shape(props)}, output=${shape(res)}`);
-        try {
-            const wrapper = findInReactTree(res, (x) => x?.accessibilityRole === "image" && x.onPress != null);
-            if (!wrapper) {
-                hit("DisplayBanner.noTapTarget", () => "no element with accessibilityRole=image and onPress in the output, not hooked");
-                return;
-            }
-
-            const bannerProps = findInReactTree(wrapper, (x) => x?.bannerSource != null);
-            const banner = resolveBanner(bannerProps?.bannerSource);
-            if (!banner) {
-                hit("DisplayBanner.noBannerSource", () => `tap target found but no usable bannerSource inside it (${describe(bannerProps?.bannerSource)})`);
-                return;
-            }
-
-            wrapper.onPress = (e) => {
-                hit(KEYS.displayBannerTap, () => `banner tapped (DisplayBanner tap target), opening ${banner.url}`);
-                openModal(banner.url, e?.nativeEvent, banner.original);
-            };
-        } catch (e) {
-            dlog("DisplayBanner", "patch threw", e);
+function serverComponentName(component: any): string | undefined {
+    try {
+        for (const name of [component?.name, component?.displayName, component?.type?.name, component?.type?.displayName, component?.render?.name, component?.render?.displayName]) {
+            if (typeof name === "string" && Object.prototype.hasOwnProperty.call(SERVER_COMPONENTS, name)) return name;
         }
-    }));
+    } catch (e) {
+        // exotic export with a throwing getter
+    }
+}
+
+function serverImage(kind: "icon" | "banner", guild: any): { url: string, original: string } | undefined {
+    const hash = kind === "icon" ? guild?.icon : guild?.banner;
+    if (typeof guild?.id !== "string" || typeof hash !== "string" || !hash) return;
+
+    const base = `https://cdn.discordapp.com/${kind === "icon" ? "icons" : "banners"}/${guild.id}/${hash}`;
+    return {
+        url: `${base}.${hash.startsWith("a_") ? "gif" : "png"}?size=4096`,
+        original: `${base}.webp?size=1024`,
+    };
+}
+
+// Icons are drawn everywhere (server list, pickers...), so only the big one opens the viewer.
+function isLargeIcon(size: unknown): boolean {
+    if (typeof size === "string") return ["XLARGE", "XXLARGE", "XXXLARGE", "JUMBO"].includes(size.toUpperCase());
+    if (typeof size === "number") return size >= 64;
+    return false;
+}
+
+safe("patch server icons and banners", () => {
+    const modules = findAll((m: any) => {
+        try {
+            return !!m && typeof m === "object" && !!m.default && !!serverComponentName(m.default);
+        } catch (e) {
+            return false;
+        }
+    }).filter(Boolean);
+
+    const seen = new Set<any>();
+    for (const mod of modules) {
+        const component = mod.default;
+        const kind = SERVER_COMPONENTS[serverComponentName(component)!];
+
+        // plain function component, memo, or forwardRef
+        const [owner, key] =
+            typeof component === "function" ? [mod, "default"]
+            : typeof component?.type === "function" ? [component, "type"]
+            : typeof component?.render === "function" ? [component, "render"]
+            : [];
+        if (!owner || seen.has(owner)) continue;
+        seen.add(owner);
+
+        unpatches.push(after(key!, owner, ([props], res) => {
+            if (!res) return;
+            if (kind === "icon" && !isLargeIcon(props?.size)) return;
+
+            const image = serverImage(kind, props?.guild);
+            if (!image) return;
+
+            return (
+                <Pressable onPress={({ nativeEvent }) => openModal(image.url, nativeEvent, image.original)}>
+                    {res}
+                </Pressable>
+            );
+        }));
+    }
 });
 
-// Server icons and banners (found by name at startup, see servers.tsx).
-safe("patch server icons and banners", () => installServerPatches(Pressable, openModal, unpatches));
-
-hooks.openModal = (src: string) => openModal(src);
-
-dlog(
-    "init",
-    `plugin loaded with ${hooks.loadErrors.length} problem(s). ProfileBanner=${ProfileBanner ? "found" : "MISSING"}, DisplayBanner=${DisplayBanner ? "found" : "MISSING"}, HeaderAvatar=${HeaderAvatar ? "found" : "MISSING"}, server components patched=${hooks.serverComponents.length}`
-);
-
-export const settings = Settings;
-
 export function onUnload() {
-    hooks.openModal = undefined;
-    hooks.serverComponents.length = 0;
-    hooks.tracing = undefined;
-    stopTrace();
     for (const unpatch of unpatches) unpatch?.();
 }

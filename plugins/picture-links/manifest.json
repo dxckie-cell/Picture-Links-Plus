@@ -1,14 +1,9 @@
 {
-    "name": "Picture Links",
-    "description": "Allows you to click on profile pictures and banners.",
+    "name": "Picture Links+",
+    "description": "Tap profile pictures, profile banners, and server icons and banners to view them full size.",
     "authors": [
       {
-        "name": "redstonekasi",
-        "id": "265064055490871297"
-      },
-      {
-        "name": "Rico040",
-        "id": "619474349845643275"
+        "name": "dxckie cell"
       }
     ],
     "main": "src/index.tsx",
