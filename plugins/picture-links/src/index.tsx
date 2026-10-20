@@ -90,7 +90,7 @@ function bannerUri(props: any): string | undefined {
         // renamed prop: any prop (or { uri } inside it) that points at a user banner on Discord's CDN
         for (const value of Object.values(props ?? {}) as any[]) {
             const uri = typeof value === "string" ? value : value?.uri ?? value?.[0]?.uri;
-            if (typeof uri === "string" && /^https?:\/\/(cdn|media)\.discordapp\.(com|net)\/banners\/\d+\//.test(uri)) return uri;
+            if (typeof uri === "string" && /^https?:\/\/(cdn|media)\.discordapp\.(com|net)\/(banners\/\d+\/|guilds\/\d+\/users\/\d+\/banners\/)/.test(uri)) return uri;
         }
     } catch (e) {
         // a getter that throws
@@ -168,16 +168,18 @@ function namesOf(component: any): string[] {
 // a profile-banner-like name is looked at. None of them is changed unless it was given a banner
 // image, so a look-alike that has nothing to do with banners is left alone.
 const BANNER_NAME = /^(\w*Profile\w*(Banner|Header|Hero|Cover)\w*|\w*(User|Profile)\w*Banner\w*|DisplayBanner\w*)$/;
-const NOT_USER_BANNER = /Guild|Server/;
+const NOT_USER_BANNER = /Guild|Server|^preload/;
 
-function patchBanner(name: string, owner: any, key: string) {
+function patchBanner(name: string, owner: any, key: string, images = false) {
     unpatches.push(after(key, owner, ([props], res) => {
-        count(`${name}.render`, () => `props=${shape(props)}, banner=${short(bannerUri(props))}`);
+        const uri = bannerUri(images ? { source: props?.source } : props);
+        // images are drawn everywhere, so only the ones showing a banner are counted
+        if (!images || uri) count(`${name}.render`, () => `props=${shape(props)}, banner=${short(uri)}`);
         if (!res) return;
 
-        const uri = bannerUri(props);
         const banner = uri && resolveBanner(uri);
         if (!banner) {
+            if (images) return;
             // normal for the first renders, while the profile is still loading
             count(`${name}.noImage`, () => `no banner image in the props. props=${shape(props)}, bannerSource=${short(props?.bannerSource)}`);
             return;
@@ -186,6 +188,7 @@ function patchBanner(name: string, owner: any, key: string) {
         count(`${name}.wrapped`);
         return (
             <Pressable
+                style={images ? props?.style : undefined}
                 onPress={({ nativeEvent }) => {
                     count(`${name}.tap`, () => `tapped, opening ${banner.url}`);
                     openModal(banner.url, nativeEvent, banner.original);
@@ -224,6 +227,22 @@ safe("patch profile banners", () => {
         patchBanner(name, target[0], target[1]);
         info.patched.push(`${name} (profile banner, via ${target[1]})`);
     }
+
+    // Discord 349 draws the banner with a component that has no usable name, so the image itself is
+    // caught instead: any image whose source is a user banner on Discord's CDN.
+    safe("patch banner images", () => {
+        const target = patchTarget({ default: ReactNative.Image });
+        if (!target || patched.has(target[0])) throw new Error("Image component cannot be patched");
+        patched.add(target[0]);
+        patchBanner("Image", target[0], target[1], true);
+        info.patched.push(`Image (banner images, via ${target[1]})`);
+    });
+
+    // what else lives next to the banner preloader, in case the component is exported there
+    safe("list banner module", () => {
+        const preload: any = findByProps("preloadUserBannerImage");
+        if (preload) info.patched.push(`module with preloadUserBannerImage exports: ${Object.keys(preload).slice(0, 30).join(", ")}`);
+    });
 
     if (!patched.size) throw new Error("no profile banner component found");
 });
