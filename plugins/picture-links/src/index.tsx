@@ -231,7 +231,32 @@ safe("patch profile banners", () => {
     // Discord 349 draws the banner with a component that has no usable name, so the element itself is
     // caught instead: anything created with a source that is a user banner on Discord's CDN.
     safe("patch banner elements", () => {
+        // temporary diagnostics: shapes of elements that carry anything banner-like
+        const seenShapes = new Set<string>();
+        const diagnose = (type: any, props: any) => {
+            count("Element.seen");
+            try {
+                for (const key in props) {
+                    if (!/banner/i.test(key)) continue;
+                    const sig = `${type?.displayName ?? type?.name ?? typeof type}:${Object.keys(props).join(",")}`;
+                    if (seenShapes.size >= 25 || seenShapes.has(sig)) return;
+                    seenShapes.add(sig);
+                    count("Element.bannerProp", () => `type=${short(type?.displayName ?? type?.name ?? typeof type)} ${key}=${short(props[key], 160)} props=${shape(props)}`);
+                    return;
+                }
+                const src = props?.source;
+                const uri = typeof src === "string" ? src : src?.uri ?? src?.[0]?.uri;
+                if (typeof uri === "string" && /banner/i.test(uri) && !seenShapes.has(uri.split("?")[0])) {
+                    seenShapes.add(uri.split("?")[0]);
+                    count("Element.bannerUrl", () => `type=${short(type?.displayName ?? type?.name ?? typeof type)} uri=${short(uri, 160)}`);
+                }
+            } catch (e) {
+                // diagnostics must never break rendering
+            }
+        };
+
         const wrapElement = (type: any, props: any, el: any) => {
+            if (props && type !== Pressable) diagnose(type, props);
             if (!el || !props || type === Pressable || !props.source) return;
             const uri = bannerUri({ source: props.source });
             const banner = uri && resolveBanner(uri);
