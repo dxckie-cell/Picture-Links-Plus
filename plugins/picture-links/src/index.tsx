@@ -228,14 +228,44 @@ safe("patch profile banners", () => {
         info.patched.push(`${name} (profile banner, via ${target[1]})`);
     }
 
-    // Discord 349 draws the banner with a component that has no usable name, so the image itself is
-    // caught instead: any image whose source is a user banner on Discord's CDN.
-    safe("patch banner images", () => {
-        const target = patchTarget({ default: ReactNative.Image });
-        if (!target || patched.has(target[0])) throw new Error("Image component cannot be patched");
-        patched.add(target[0]);
-        patchBanner("Image", target[0], target[1], true);
-        info.patched.push(`Image (banner images, via ${target[1]})`);
+    // Discord 349 draws the banner with a component that has no usable name, so the element itself is
+    // caught instead: anything created with a source that is a user banner on Discord's CDN.
+    safe("patch banner elements", () => {
+        const wrapElement = (type: any, props: any, el: any) => {
+            if (!el || !props || type === Pressable || !props.source) return;
+            const uri = bannerUri({ source: props.source });
+            const banner = uri && resolveBanner(uri);
+            if (!banner) return;
+
+            count("Element.banner", () => `type=${short(type?.displayName ?? type?.name ?? typeof type)}, props=${shape(props)}, banner=${short(uri)}`);
+            return (
+                <Pressable
+                    style={props.style}
+                    onPress={({ nativeEvent }) => {
+                        count("Element.tap", () => `tapped, opening ${banner.url}`);
+                        openModal(banner.url, nativeEvent, banner.original);
+                    }}
+                >
+                    {el}
+                </Pressable>
+            );
+        };
+
+        let hooked = 0;
+        const runtime: any = findByProps("jsx", "jsxs");
+        for (const key of ["jsx", "jsxs", "jsxDEV"]) {
+            if (typeof runtime?.[key] !== "function") continue;
+            unpatches.push(after(key, runtime, ([type, props], el) => wrapElement(type, props, el)));
+            hooked++;
+        }
+        const react: any = findByProps("createElement", "useState");
+        if (typeof react?.createElement === "function") {
+            unpatches.push(after("createElement", react, ([type, props], el) => wrapElement(type, props, el)));
+            hooked++;
+        }
+        if (!hooked) throw new Error("no element factory found");
+        patched.add("elements");
+        info.patched.push(`React elements with a banner source (${hooked} factories)`);
     });
 
     // what else lives next to the banner preloader, in case the component is exported there

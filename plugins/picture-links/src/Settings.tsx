@@ -14,8 +14,8 @@ function verdict(): string {
     if (info.errors.some((e) => e.startsWith("patch profile banners"))) {
         return "No profile banner component was found, so banners cannot be made tappable. Press \"Scan banner components\" and send me the report.";
     }
-    const renders = countEnding(".render");
-    const wrapped = countEnding(".wrapped");
+    const renders = countEnding(".render") + countEnding(".banner");
+    const wrapped = countEnding(".wrapped") + countEnding(".banner");
     const taps = countEnding(".tap");
 
     if (!renders) return "Profile banner components were found and patched, but none has been drawn yet. Open a profile that has a banner, come back here and check again.";
