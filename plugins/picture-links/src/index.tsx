@@ -257,8 +257,10 @@ safe("patch profile banners", () => {
 
         const wrapElement = (type: any, props: any, el: any) => {
             if (props && type !== Pressable) diagnose(type, props);
-            if (!el || !props || type === Pressable || !props.source) return;
-            const uri = bannerUri({ source: props.source });
+            if (!el || !props || type === Pressable) return;
+            // cheap test first: this runs for every element Discord creates
+            if (!props.source && !BANNER_PROPS.some((k) => props[k] !== undefined)) return;
+            const uri = bannerUri(props);
             const banner = uri && resolveBanner(uri);
             if (!banner) return;
 
