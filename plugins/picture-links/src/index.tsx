@@ -3,8 +3,6 @@ import { findAll, findByProps, findByName, findByStoreName } from "@vendetta/met
 import { after } from "@vendetta/patcher";
 import { ReactNative } from "@vendetta/metro/common";
 
-import { count, info, note, shape, short } from "./log";
-import Settings from "./Settings";
 
 /**
  * Runs fn and logs instead of throwing. A plugin that throws while loading is switched off by the
@@ -14,7 +12,6 @@ function safe<T>(label: string, fn: () => T): T | undefined {
     try {
         return fn();
     } catch (e) {
-        info.errors.push(`${label}: ${short(e)}`);
         try {
             logger.warn(`[Picture Links+] ${label} failed`, e);
         } catch (e2) {
@@ -24,7 +21,6 @@ function safe<T>(label: string, fn: () => T): T | undefined {
 }
 
 const Pressable = safe("find Pressable", () => findByProps("Button", "Text", "View")?.Pressable ?? ReactNative.Pressable);
-const ProfileBanner = safe("find ProfileBanner", () => findByName("ProfileBanner", false));
 const HeaderAvatar = safe("find HeaderAvatar", () => findByName("HeaderAvatar", false));
 const openMediaModal = safe("find openMediaModal", () => findByProps("openMediaModal")?.openMediaModal);
 const hideActionSheet = safe("find hideActionSheet", () => findByProps("hideActionSheet")?.hideActionSheet);
@@ -48,7 +44,6 @@ async function openModal(src: string, event?, fallback?: string) {
     try {
         size = await getImageSize(src);
     } catch (e) {
-        note(`image failed to load: ${src} (${short(e)})`);
         if (fallback && fallback !== src) return openModal(fallback, event);
         return;
     }
@@ -98,9 +93,8 @@ function bannerUri(props: any): string | undefined {
 }
 
 // Full-size URL for a user banner, plus the untouched original as a fallback.
-function resolveBanner(bannerSource: any): { url: string, original: string } | undefined {
-    const original = typeof bannerSource === "string" ? bannerSource : bannerSource?.uri;
-    if (typeof original !== "string" || !original) return;
+function resolveBanner(original: string | undefined): { url: string, original: string } | undefined {
+    if (!original) return;
 
     // Only rewrite Discord CDN links. Anything else (e.g. custom banner hosts) is used as-is.
     if (!/^https?:\/\/(cdn\.discordapp\.com|media\.discordapp\.net)\//.test(original)) {
@@ -144,164 +138,42 @@ safe("patch HeaderAvatar", () => {
     }));
 });
 
-// Where a component can be patched: a plain function, a memo, or a forwardRef.
-function patchTarget(mod: any): [any, string] | undefined {
-    const component = mod?.default;
-    if (typeof component === "function") return [mod, "default"];
-    if (typeof component?.type === "function") return [component, "type"];
-    if (typeof component?.render === "function") return [component, "render"];
-}
-
-function namesOf(component: any): string[] {
-    try {
-        return [component?.name, component?.displayName, component?.type?.name, component?.type?.displayName, component?.render?.name, component?.render?.displayName]
-            .filter((n): n is string => typeof n === "string" && !!n);
-    } catch (e) {
-        return [];
-    }
-}
-
-// Profile banners.
+// Profile banners (users and bots).
 //
-// Discord 343 draws them with a component called ProfileBanner. After an update the component may
-// be renamed (ProfileBannerV2, UserProfileBanner...), so besides ProfileBanner every component with
-// a profile-banner-like name is looked at. None of them is changed unless it was given a banner
-// image, so a look-alike that has nothing to do with banners is left alone.
-const BANNER_NAME = /^(\w*Profile\w*(Banner|Header|Hero|Cover)\w*|\w*(User|Profile)\w*Banner\w*|DisplayBanner\w*)$/;
-const NOT_USER_BANNER = /Guild|Server|^preload/;
+// Discord 349 draws them with a component that has no usable name, so the element is caught instead:
+// anything handed a user banner on Discord's CDN, or a banner-named prop. The patch is on React's
+// element factories, so it is cheap-tested first and leaves everything else alone.
+safe("patch profile banners", () => {
+    const wrapElement = (type: any, props: any, el: any) => {
+        if (!el || !props || type === Pressable) return;
+        if (!props.source && !BANNER_PROPS.some((k) => props[k] !== undefined)) return;
 
-function patchBanner(name: string, owner: any, key: string, images = false) {
-    unpatches.push(after(key, owner, ([props], res) => {
-        const uri = bannerUri(images ? { source: props?.source } : props);
-        // images are drawn everywhere, so only the ones showing a banner are counted
-        if (!images || uri) count(`${name}.render`, () => `props=${shape(props)}, banner=${short(uri)}`);
-        if (!res) return;
+        const banner = resolveBanner(bannerUri(props));
+        if (!banner) return;
 
-        const banner = uri && resolveBanner(uri);
-        if (!banner) {
-            if (images) return;
-            // normal for the first renders, while the profile is still loading
-            count(`${name}.noImage`, () => `no banner image in the props. props=${shape(props)}, bannerSource=${short(props?.bannerSource)}`);
-            return;
-        }
-
-        count(`${name}.wrapped`);
         return (
             <Pressable
-                style={images ? props?.style : undefined}
-                onPress={({ nativeEvent }) => {
-                    count(`${name}.tap`, () => `tapped, opening ${banner.url}`);
-                    openModal(banner.url, nativeEvent, banner.original);
-                }}
+                style={props.style}
+                onPress={({ nativeEvent }) => openModal(banner.url, nativeEvent, banner.original)}
             >
-                {res}
+                {el}
             </Pressable>
         );
-    }));
-}
+    };
 
-safe("patch profile banners", () => {
-    const patched = new Set<any>();
-    const candidates: [string, any][] = [];
-
-    // the component Discord 343 uses
-    if (ProfileBanner) candidates.push(["ProfileBanner", ProfileBanner]);
-    else info.errors.push("ProfileBanner component not found, looking for look-alikes");
-
-    // anything else named like a profile banner
-    const found = findAll((m: any) => {
-        try {
-            if (!m || typeof m !== "object" || !m.default) return false;
-            return namesOf(m.default).some((n) => BANNER_NAME.test(n) && !NOT_USER_BANNER.test(n));
-        } catch (e) {
-            return false;
-        }
-    }).filter(Boolean);
-    for (const mod of found) candidates.push([namesOf(mod.default).find((n) => BANNER_NAME.test(n)) ?? "?", mod]);
-
-    for (const [name, mod] of candidates) {
-        const target = patchTarget(mod);
-        if (!target || patched.has(target[0])) continue;
-        patched.add(target[0]);
-
-        patchBanner(name, target[0], target[1]);
-        info.patched.push(`${name} (profile banner, via ${target[1]})`);
+    let hooked = 0;
+    const runtime: any = findByProps("jsx", "jsxs");
+    for (const key of ["jsx", "jsxs", "jsxDEV"]) {
+        if (typeof runtime?.[key] !== "function") continue;
+        unpatches.push(after(key, runtime, ([type, props], el) => wrapElement(type, props, el)));
+        hooked++;
     }
-
-    // Discord 349 draws the banner with a component that has no usable name, so the element itself is
-    // caught instead: anything created with a source that is a user banner on Discord's CDN.
-    safe("patch banner elements", () => {
-        // temporary diagnostics: shapes of elements that carry anything banner-like
-        const seenShapes = new Set<string>();
-        const diagnose = (type: any, props: any) => {
-            count("Element.seen");
-            try {
-                for (const key in props) {
-                    if (!/banner/i.test(key)) continue;
-                    const sig = `${type?.displayName ?? type?.name ?? typeof type}:${Object.keys(props).join(",")}`;
-                    if (seenShapes.size >= 25 || seenShapes.has(sig)) return;
-                    seenShapes.add(sig);
-                    count("Element.bannerProp", () => `type=${short(type?.displayName ?? type?.name ?? typeof type)} ${key}=${short(props[key], 160)} props=${shape(props)}`);
-                    return;
-                }
-                const src = props?.source;
-                const uri = typeof src === "string" ? src : src?.uri ?? src?.[0]?.uri;
-                if (typeof uri === "string" && /banner/i.test(uri) && !seenShapes.has(uri.split("?")[0])) {
-                    seenShapes.add(uri.split("?")[0]);
-                    count("Element.bannerUrl", () => `type=${short(type?.displayName ?? type?.name ?? typeof type)} uri=${short(uri, 160)}`);
-                }
-            } catch (e) {
-                // diagnostics must never break rendering
-            }
-        };
-
-        const wrapElement = (type: any, props: any, el: any) => {
-            if (props && type !== Pressable) diagnose(type, props);
-            if (!el || !props || type === Pressable) return;
-            // cheap test first: this runs for every element Discord creates
-            if (!props.source && !BANNER_PROPS.some((k) => props[k] !== undefined)) return;
-            const uri = bannerUri(props);
-            const banner = uri && resolveBanner(uri);
-            if (!banner) return;
-
-            count("Element.banner", () => `type=${short(type?.displayName ?? type?.name ?? typeof type)}, props=${shape(props)}, banner=${short(uri)}`);
-            return (
-                <Pressable
-                    style={props.style}
-                    onPress={({ nativeEvent }) => {
-                        count("Element.tap", () => `tapped, opening ${banner.url}`);
-                        openModal(banner.url, nativeEvent, banner.original);
-                    }}
-                >
-                    {el}
-                </Pressable>
-            );
-        };
-
-        let hooked = 0;
-        const runtime: any = findByProps("jsx", "jsxs");
-        for (const key of ["jsx", "jsxs", "jsxDEV"]) {
-            if (typeof runtime?.[key] !== "function") continue;
-            unpatches.push(after(key, runtime, ([type, props], el) => wrapElement(type, props, el)));
-            hooked++;
-        }
-        const react: any = findByProps("createElement", "useState");
-        if (typeof react?.createElement === "function") {
-            unpatches.push(after("createElement", react, ([type, props], el) => wrapElement(type, props, el)));
-            hooked++;
-        }
-        if (!hooked) throw new Error("no element factory found");
-        patched.add("elements");
-        info.patched.push(`React elements with a banner source (${hooked} factories)`);
-    });
-
-    // what else lives next to the banner preloader, in case the component is exported there
-    safe("list banner module", () => {
-        const preload: any = findByProps("preloadUserBannerImage");
-        if (preload) info.patched.push(`module with preloadUserBannerImage exports: ${Object.keys(preload).slice(0, 30).join(", ")}`);
-    });
-
-    if (!patched.size) throw new Error("no profile banner component found");
+    const react: any = findByProps("createElement", "useState");
+    if (typeof react?.createElement === "function") {
+        unpatches.push(after("createElement", react, ([type, props], el) => wrapElement(type, props, el)));
+        hooked++;
+    }
+    if (!hooked) throw new Error("no element factory found");
 });
 
 // Server icons and banners.
@@ -366,7 +238,6 @@ safe("patch server icons and banners", () => {
             : [];
         if (!owner || seen.has(owner)) continue;
         seen.add(owner);
-        info.patched.push(`${serverComponentName(component)} (server ${kind}, via ${key})`);
 
         unpatches.push(after(key!, owner, ([props], res) => {
             if (!res) return;
@@ -383,8 +254,6 @@ safe("patch server icons and banners", () => {
         }));
     }
 });
-
-export const settings = Settings;
 
 export function onUnload() {
     for (const unpatch of unpatches) unpatch?.();
