@@ -87,6 +87,11 @@ function bannerUri(props: any): string | undefined {
             const uri = typeof value === "string" ? value : value?.uri ?? value?.[0]?.uri;
             if (typeof uri === "string" && /^https?:\/\//.test(uri)) return uri;
         }
+        // renamed prop: any prop (or { uri } inside it) that points at a user banner on Discord's CDN
+        for (const value of Object.values(props ?? {}) as any[]) {
+            const uri = typeof value === "string" ? value : value?.uri ?? value?.[0]?.uri;
+            if (typeof uri === "string" && /^https?:\/\/(cdn|media)\.discordapp\.(com|net)\/banners\/\d+\//.test(uri)) return uri;
+        }
     } catch (e) {
         // a getter that throws
     }
@@ -162,7 +167,7 @@ function namesOf(component: any): string[] {
 // be renamed (ProfileBannerV2, UserProfileBanner...), so besides ProfileBanner every component with
 // a profile-banner-like name is looked at. None of them is changed unless it was given a banner
 // image, so a look-alike that has nothing to do with banners is left alone.
-const BANNER_NAME = /^(ProfileBanner\w*|User\w*Banner\w*|Profile\w*Banner\w*|DisplayBanner\w*)$/;
+const BANNER_NAME = /^(\w*Profile\w*(Banner|Header|Hero|Cover)\w*|\w*(User|Profile)\w*Banner\w*|DisplayBanner\w*)$/;
 const NOT_USER_BANNER = /Guild|Server/;
 
 function patchBanner(name: string, owner: any, key: string) {

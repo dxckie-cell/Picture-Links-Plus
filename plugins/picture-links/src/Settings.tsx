@@ -31,7 +31,7 @@ function scan(): string[] {
             if (!m || typeof m !== "object" || !m.default) return false;
             const c = m.default;
             return [c?.name, c?.displayName, c?.type?.name, c?.type?.displayName, c?.render?.name].some(
-                (n) => typeof n === "string" && /banner/i.test(n)
+                (n) => typeof n === "string" && /banner|profile.*(header|hero|cover)/i.test(n)
             );
         } catch (e) {
             return false;
@@ -41,7 +41,7 @@ function scan(): string[] {
     const lines = new Set<string>();
     for (const mod of modules) {
         const c = mod.default;
-        const name = [c?.name, c?.displayName, c?.type?.name, c?.type?.displayName, c?.render?.name].find((n) => typeof n === "string" && /banner/i.test(n)) ?? "?";
+        const name = [c?.name, c?.displayName, c?.type?.name, c?.type?.displayName, c?.render?.name].find((n) => typeof n === "string" && /banner|profile.*(header|hero|cover)/i.test(n)) ?? "?";
         const kind = typeof c === "function" ? "function" : c?.type ? "memo" : c?.render ? "forwardRef" : "object";
         lines.add(`${name} [${kind}]`);
     }
