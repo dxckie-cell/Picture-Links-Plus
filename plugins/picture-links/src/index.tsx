@@ -3,6 +3,9 @@ import { findAll, findByProps, findByName, findByStoreName } from "@vendetta/met
 import { after } from "@vendetta/patcher";
 import { ReactNative } from "@vendetta/metro/common";
 
+import { count, info, note, shape, short } from "./log";
+import Settings from "./Settings";
+
 /**
  * Runs fn and logs instead of throwing. A plugin that throws while loading is switched off by the
  * client, so one missing component must not take the others down with it.
@@ -11,6 +14,7 @@ function safe<T>(label: string, fn: () => T): T | undefined {
     try {
         return fn();
     } catch (e) {
+        info.errors.push(`${label}: ${short(e)}`);
         try {
             logger.warn(`[Picture Links+] ${label} failed`, e);
         } catch (e2) {
@@ -44,7 +48,7 @@ async function openModal(src: string, event?, fallback?: string) {
     try {
         size = await getImageSize(src);
     } catch (e) {
-        safe("load image size", () => logger.warn(`[Picture Links+] Failed to load image size for ${src}`, e));
+        note(`image failed to load: ${src} (${short(e)})`);
         if (fallback && fallback !== src) return openModal(fallback, event);
         return;
     }
@@ -70,6 +74,22 @@ async function openModal(src: string, event?, fallback?: string) {
             }
         });
     });
+}
+
+// The banner image a banner component was given. The prop has been called bannerSource; other
+// names and shapes (a plain url, a { uri }, a list of { uri }) are accepted in case Discord changes it.
+const BANNER_PROPS = ["bannerSource", "bannerURL", "bannerUrl", "bannerUri", "bannerImage", "banner"];
+
+function bannerUri(props: any): string | undefined {
+    try {
+        for (const key of BANNER_PROPS) {
+            const value = props?.[key];
+            const uri = typeof value === "string" ? value : value?.uri ?? value?.[0]?.uri;
+            if (typeof uri === "string" && /^https?:\/\//.test(uri)) return uri;
+        }
+    } catch (e) {
+        // a getter that throws
+    }
 }
 
 // Full-size URL for a user banner, plus the untouched original as a fallback.
@@ -119,20 +139,88 @@ safe("patch HeaderAvatar", () => {
     }));
 });
 
-// Profile banners
-safe("patch ProfileBanner", () => {
-    if (!ProfileBanner) throw new Error("ProfileBanner component not found");
+// Where a component can be patched: a plain function, a memo, or a forwardRef.
+function patchTarget(mod: any): [any, string] | undefined {
+    const component = mod?.default;
+    if (typeof component === "function") return [mod, "default"];
+    if (typeof component?.type === "function") return [component, "type"];
+    if (typeof component?.render === "function") return [component, "render"];
+}
 
-    unpatches.push(after("default", ProfileBanner, ([props], res) => {
-        const banner = resolveBanner(props?.bannerSource);
-        if (!banner || !res) return res;
+function namesOf(component: any): string[] {
+    try {
+        return [component?.name, component?.displayName, component?.type?.name, component?.type?.displayName, component?.render?.name, component?.render?.displayName]
+            .filter((n): n is string => typeof n === "string" && !!n);
+    } catch (e) {
+        return [];
+    }
+}
 
+// Profile banners.
+//
+// Discord 343 draws them with a component called ProfileBanner. After an update the component may
+// be renamed (ProfileBannerV2, UserProfileBanner...), so besides ProfileBanner every component with
+// a profile-banner-like name is looked at. None of them is changed unless it was given a banner
+// image, so a look-alike that has nothing to do with banners is left alone.
+const BANNER_NAME = /^(ProfileBanner\w*|User\w*Banner\w*|Profile\w*Banner\w*|DisplayBanner\w*)$/;
+const NOT_USER_BANNER = /Guild|Server/;
+
+function patchBanner(name: string, owner: any, key: string) {
+    unpatches.push(after(key, owner, ([props], res) => {
+        count(`${name}.render`, () => `props=${shape(props)}, banner=${short(bannerUri(props))}`);
+        if (!res) return;
+
+        const uri = bannerUri(props);
+        const banner = uri && resolveBanner(uri);
+        if (!banner) {
+            // normal for the first renders, while the profile is still loading
+            count(`${name}.noImage`, () => `no banner image in the props. props=${shape(props)}, bannerSource=${short(props?.bannerSource)}`);
+            return;
+        }
+
+        count(`${name}.wrapped`);
         return (
-            <Pressable onPress={({ nativeEvent }) => openModal(banner.url, nativeEvent, banner.original)}>
+            <Pressable
+                onPress={({ nativeEvent }) => {
+                    count(`${name}.tap`, () => `tapped, opening ${banner.url}`);
+                    openModal(banner.url, nativeEvent, banner.original);
+                }}
+            >
                 {res}
             </Pressable>
         );
     }));
+}
+
+safe("patch profile banners", () => {
+    const patched = new Set<any>();
+    const candidates: [string, any][] = [];
+
+    // the component Discord 343 uses
+    if (ProfileBanner) candidates.push(["ProfileBanner", ProfileBanner]);
+    else info.errors.push("ProfileBanner component not found, looking for look-alikes");
+
+    // anything else named like a profile banner
+    const found = findAll((m: any) => {
+        try {
+            if (!m || typeof m !== "object" || !m.default) return false;
+            return namesOf(m.default).some((n) => BANNER_NAME.test(n) && !NOT_USER_BANNER.test(n));
+        } catch (e) {
+            return false;
+        }
+    }).filter(Boolean);
+    for (const mod of found) candidates.push([namesOf(mod.default).find((n) => BANNER_NAME.test(n)) ?? "?", mod]);
+
+    for (const [name, mod] of candidates) {
+        const target = patchTarget(mod);
+        if (!target || patched.has(target[0])) continue;
+        patched.add(target[0]);
+
+        patchBanner(name, target[0], target[1]);
+        info.patched.push(`${name} (profile banner, via ${target[1]})`);
+    }
+
+    if (!patched.size) throw new Error("no profile banner component found");
 });
 
 // Server icons and banners.
@@ -197,6 +285,7 @@ safe("patch server icons and banners", () => {
             : [];
         if (!owner || seen.has(owner)) continue;
         seen.add(owner);
+        info.patched.push(`${serverComponentName(component)} (server ${kind}, via ${key})`);
 
         unpatches.push(after(key!, owner, ([props], res) => {
             if (!res) return;
@@ -213,6 +302,8 @@ safe("patch server icons and banners", () => {
         }));
     }
 });
+
+export const settings = Settings;
 
 export function onUnload() {
     for (const unpatch of unpatches) unpatch?.();

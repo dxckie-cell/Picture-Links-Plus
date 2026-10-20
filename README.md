@@ -16,6 +16,8 @@ GitHub Pages must be enabled for this repo (Settings → Pages → "Deploy from 
 
 - **Profile banners open again.** The old code built the full-size banner link with a regex that only handled a trailing `?size=`; any extra parameter produced a broken link and the tap silently did nothing. The whole query string is now replaced, failed image loads are logged, and the original link is tried as a fallback.
 - **Server icons and banners.** Tap the large server icon in the server menu to open the icon, or the header's banner area to open the banner (animated ones open as GIFs). On Discord 343 these are the `GuildIconInner` and `GuildActionSheetHeader` components. Small icons (the server list, pickers) are left alone.
+- **Survives Discord updates.** Besides `ProfileBanner`, any component with a profile-banner-like name is patched (only when it is handed a banner image), and several banner prop names and shapes are accepted.
+- **Report page.** The plugin's settings screen explains in plain words whether banners are found, drawn and tapped, and has "Copy report" and "Scan banner components" buttons for diagnosing a Discord update without client logs.
 - **Safe loading.** Every lookup and patch is guarded, so a component that is missing in your Discord version is logged instead of making the client switch the whole plugin off.
 
 ## Building
